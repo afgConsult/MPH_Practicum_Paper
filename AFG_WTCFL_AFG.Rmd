@@ -1,0 +1,560 @@
+---
+title: "WTC FL Project"
+author: "Alex Gomez"
+date: "2023-07-05"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, include=FALSE}
+
+library(tidymodels)
+
+library(UsingR)
+library(forcats)
+library(stats)
+library(knitr)
+library(kableExtra)
+library(DataExplorer)
+library(htmlTable)
+
+library(tidyverse)
+library(readxl)
+library(gtsummary)
+library(tidymodels)
+```
+
+```{r data, echo=FALSE, include=FALSE}
+my_files <- list.files(
+  path = "raw_data",
+  pattern = "*.xlsx",
+  full.names = TRUE
+)
+
+my_data <- map(my_files, ~ read_excel(.x))
+
+my_data <- setNames(my_data, c("Beast", "CodeBook", "Demographics", "EAQ", "MHDIS", "MHSQ", "SAMHQ", "SAMQ", "WEBAPP_MONITORING", "WEBAPP_MONITORING", "Suppliment"))
+
+# This function changes all the comments variables to set the name of the data set and then comment. For example, the Demographics data set will have a vector called Comment_Demographics
+
+my_data <- map2(my_data, names(my_data), function(data, name) {
+  colnames(data)[colnames(data) == "Comment"] <- paste0("Comment_", name)
+  return(data)
+})
+
+list2env(my_data, envir = .GlobalEnv)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+demographics <- Demographics |>
+  select(-c(
+    Comment_Demographics, Race8, DOB, Income_Category,
+    Educ_Level_Code, Language_Code, Mar_Stat, Marital_Stat_Code, RaceHispanic, Agev1
+  )) |>
+  mutate(is_working = case_when(
+    Current_Work_Status %in% c(1, 2, 12, 104, 105, 106) ~ 1,
+    Current_Work_Status %in% c(3, 4, 5, 6, 7, 8, 9, 11, 14) ~ 0,
+    TRUE ~ NA
+  )) |>
+  mutate(is_working = as.logical(is_working)) |>
+  select(-Current_Work_Status) |>
+  mutate(Income = case_when(
+    Incom_gp %in% c(1, 2) ~ "<$30,000 - $60,000",
+    Incom_gp %in% c(3, 4) ~ "$60,000 - >80,000",
+    TRUE ~ NA
+  )) |>
+  select(-Incom_gp) |>
+  mutate(Education = case_when(
+    Education %in% c(0, 1) ~ "High school",
+    Education %in% c(2, 3, 4) ~ "University",
+    TRUE ~ NA
+  )) |>
+  mutate(Race = case_when(
+    Race == 1 ~ "White",
+    Race == 2 ~ "Black",
+    Race %in% c(3, 4) ~ "Other",
+    Race == "Unkown" ~ NA_character_,
+    TRUE ~ NA_character_
+  ))
+# 2809 x 10
+
+psycho_variables_df <- MHDIS |>
+  filter(Visit_Number == 2) |>
+  select(
+    Extract_ID, DIS_MDD_Since911,
+    DIS_PTSD_Current_A1A2met, DIS_PTSD_Chronic_A1A2met,
+    DIS_PTSD_Acute_A1A2met, DIS_PTSD_Delayed_A1A2met,
+    DIS_PTSD_12Mo_A1A2met, MHDIS_01_04,
+    MHDIS_02_07, MHDIS_02_08,
+    MHDIS_01_01, MHDIS_02_16,
+    MHDIS_01_02, MHDIS_01_03, MHDIS_02_01,
+    MHDIS_02_02, MHDIS_02_03, MHDIS_02_04,
+    MHDIS_02_05, MHDIS_04_11, MHDIS_04_16, MHDIS_04_13,
+    MHDIS_04_02, MHDIS_04_05, MHDIS_04_06, MHDIS_02_06
+  ) |>
+  mutate(across(MHDIS_01_04:MHDIS_02_06, ~ case_when(
+    . %in% c(
+      "-555", "-666", "-99", "-100", "-101", "-103", "-222", "-999",
+      "-102", "-104", "-98", "-96", "-95", "-97"
+    ) ~ NA_real_,
+    TRUE ~ as.numeric(.)
+  ))) |>
+  mutate(across(MHDIS_01_01:MHDIS_02_06, ~ case_when(
+    . == -1 ~ 1,
+    TRUE ~ as.numeric(.)
+  ))) |>
+  mutate(MHDIS_02_07 = case_when(
+    MHDIS_02_07 == 1 ~ 1,
+    MHDIS_02_07 == 2 ~ 0,
+    TRUE ~ NA
+  )) |>
+  mutate(across(c(
+    MHDIS_02_07, DIS_MDD_Since911:DIS_PTSD_12Mo_A1A2met,
+    MHDIS_01_01:MHDIS_04_11
+  ), as.logical))
+# 2278 x 22
+
+exposure_df <- EAQ |>
+  select(Extract_ID, TotalMonthsOnEffort, Arrival, CompositeExposure = Exp4_Imputed) |>
+  mutate(Arrival = as.factor(Arrival))
+
+# 2809 x  4
+
+family_df <- SAMHQ |>
+  filter(Visit_Number == 2) |>
+  select(Extract_ID, GEN_ANX_DX, PANIC_DISORDER, SAMHQ_00_04, SAMHQ_00_05) |>
+  # Transform this variable for simplicity, never married, single, divorced etc
+  # means no partner therefore 0.
+  # married, partnered living with partner means partner therefore 1
+  mutate(SAMHQ_00_04 = case_when(
+    SAMHQ_00_04 %in% c(1, 3, 5, 6, 8) ~ 0,
+    SAMHQ_00_04 %in% c(2, 4, 7) ~ 1,
+    TRUE ~ NA
+  ))
+# 2278 x 5
+
+treatment_injury <- SAMQ |>
+  select(Extract_ID, TreatmentInjury = SAMQ_01_01_Num) |>
+  mutate(TreatmentInjury = as.factor(TreatmentInjury))
+
+
+analysis_df <-
+  left_join(demographics, psycho_variables_df, by = "Extract_ID") |>
+  left_join(exposure_df, by = "Extract_ID") |>
+  left_join(family_df, by = "Extract_ID") |>
+  left_join(treatment_injury, by = "Extract_ID") |>
+  rename(
+    Depression = DIS_MDD_Since911,
+    PTSD = DIS_PTSD_Current_A1A2met,
+    PsychologySupport = MHDIS_04_11,
+    HasPartner = SAMHQ_00_04,
+    HasChildren = SAMHQ_00_05,
+    Anxiety = GEN_ANX_DX,
+    PanicDisorder = PANIC_DISORDER,
+    ChronicPTSD = DIS_PTSD_Chronic_A1A2met,
+    AcutePTSD = DIS_PTSD_Acute_A1A2met,
+    DelayedPTSD = DIS_PTSD_Delayed_A1A2met,
+    PTSD12Months = DIS_PTSD_12Mo_A1A2met,
+    NumberFamiliarPplKilled = MHDIS_01_04,
+    CloseRecoveryBodies = MHDIS_02_07,
+    NumberRevoceryOfBodies = MHDIS_02_08,
+    BelieveLifeiInDangerDuringAttack = MHDIS_01_01,
+    SeeFamiliesVictims = MHDIS_02_16,
+    BelieveLifeInDangerByWork = MHDIS_01_02,
+    KnowPeopleKilled = MHDIS_01_03,
+    SeeInjuredOrKilledEvacuation = MHDIS_02_01,
+    SeeDeadBodies = MHDIS_02_02,
+    SeeRecognizableBodyParts = MHDIS_02_03,
+    SeeUnrecognizableBodyParts = MHDIS_02_04,
+    SeePersonalEffects = MHDIS_02_05,
+    IllnessCausedbyEffort = MHDIS_04_02,
+    SeeRecoveryOfBodies = MHDIS_02_06,
+    PyshologicalHarm = MHDIS_04_05,
+    RecoveredPsychologicalHarm = MHDIS_04_06, 
+    CurrentMentalHealth = MHDIS_04_16, 
+    AfterMentalHealthSupport = MHDIS_04_13
+  ) |>
+  mutate(Sex = case_when(
+    Gender == 0 ~ "Male",
+    Gender == 1 ~ "Female",
+    TRUE ~ NA
+  )) |>
+  mutate(across(c(
+    HasChildren, Hispanic, Anxiety, PanicDisorder, HasPartner,
+    SeeRecoveryOfBodies, AfterMentalHealthSupport, 
+    CurrentMentalHealth
+  ), as.logical)) |>
+  mutate(across(c(
+    Education, Income, Race, Sex, CompositeExposure,
+    IllnessCausedbyEffort, PyshologicalHarm, RecoveredPsychologicalHarm
+  ), as.factor)) |>
+  select(-Gender)
+
+#skimr::skim(analysis_df)
+```
+
+```{r, echo=FALSE}
+ptsd_table <- analysis_df |>
+  select(-Extract_ID) |>
+  mutate(PTSD = case_when(
+    PTSD == FALSE ~ "No",
+    PTSD == TRUE ~ "Yes",
+    TRUE ~ NA
+  )) |>
+  filter(!is.na(PTSD))
+
+#table1::table1(~ . | PTSD, data = ptsd_table)
+```
+
+```{r, echo=FALSE}
+analysis_2 <- analysis_df |>
+  mutate(across(where(is.logical), factor)) |>
+  mutate(across(c(
+    Hispanic:PTSD12Months, CloseRecoveryBodies,
+    BelieveLifeiInDangerDuringAttack:PsychologySupport,
+    Anxiety:HasChildren, IllnessCausedbyEffort
+  ), factor)) |>
+  select(-Depression) |> # Removed given that only 7 cases have depression
+  select(-"ChronicPTSD", -"DelayedPTSD", -"AcutePTSD", -"PTSD12Months") |>
+  filter(!is.na(PTSD)) |>
+  select(-Extract_ID, -Current_Clinic)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+indexVars <- c("SeeDeadBodies", "SeeRecognizableBodyParts", "SeeUnrecognizableBodyParts", "SeeRecoveryOfBodies")
+
+analysis_3 <-
+  analysis_2 %>%
+  mutate(across(indexVars, as.numeric)) |>
+  mutate(across(indexVars, ~ .x - 1)) |>
+  rowwise() %>%
+  mutate(index = sum(!is.na(c_across(indexVars)))) |>
+  mutate(naRows = sum(is.na(c_across(indexVars)))) |>
+  mutate(meanRows = mean(c_across(indexVars), na.rm = TRUE)) |>
+  mutate(AggregatedExposureScore = ifelse(meanRows > 0, 1, 0)) |>
+  select(-c(index, naRows, all_of(indexVars), meanRows)) |>
+  select(-NumberFamiliarPplKilled) 
+```
+# World Trade Center First Respondents and Developments of PTSD
+
+
+## Abstract
+
+### Background
+Post Traumatic Stress Disorder (PTSD) is disproportionately present in individuals who are first responders due to the nature of the profession. Following the September 11th terror attack, care for the first responders has been a public health priority. While much of the research has focused on the respiratory effects 9/11 had on first responders. The focus of this study is on the mental health effects 9/11 may have had on first responders.
+
+### Objectives
+The aim of the practicum is to provide a service to investigators regarding data management and analysis. This was done by reviewing the Data User Guidelines (DUG), wrangling the data, consulting the nature of variables with investigators, and proceeding with the data team on appropriate analysis. Then to report results with the research team. 
+
+### Methods 
+To investigate the relationship between participant’s characteristics and the odds of having PTSD symptoms, a multiple variable logistic regression was run on the data. The output variable as encoded in the DUG is DIS_PTSD_Current_A1A2met, defined as Current PTSD symptoms. Meaning, is the participant currently suffering from symptoms of PTSD at the time of assessment. The selected output variable is binary (True = 105, False = 1170). Eight variables were selected based on literacy relevancy. A series of variables that account for exposures first responders may have experienced during 9/11 were added to independent models. Each of the primary variables were interpreted to understand how the experiences exposed to during 9/11 may affect one’s odds of being symptomatic. 
+
+### Results
+Amongst the Characteristic Variables, Age when 9/11 occurred (Age911), annual earnings (Income), and If the participant is currently in treatment for injury that occurred during 911 (TreamtmentInjury) were found to be the most common significant as each of the seven exposure models. If the the respondor is currently employed and Education were considered significant in at least one of the models. All exposure variables except having known someone killed were considered significant.
+
+### Conclusions
+Based on the results provided. Given all variables in the model it appears that many experiences may lead to increasing chances of having PTSD symptoms. These individuals as first responders face many of these exposures at elevated levels compared to the general population. It is important to consider the statistically significant variables when building a model of treatment. . Especially following events such as the Surfside building collapse. Based on the results regarding characteristics, it is important to provide treatment for physical injuries that may have occurred due to an event, as the stressor of recovery along with the lingering reminder worn on one’s body may exacerbate any symptoms of PTSD. 
+
+
+## Background
+
+### Literature Reveiw 
+  Posttraumatic stress disorder (PTSD) is a condition with possible onset after exposure to a traumatic event. The onset of symptoms may include flashbacks, avoiding places, actions, or events that remind the person of the event, nihilism, and increased arousal or reactivity (American Psychiatric Association, 2013). These symptoms can significantly impact an individual's quality of life and may lead to additional mental health problems, such as depression and anxiety. 
+  PTSD is a particularly significant issue for 9/11 first responders. 9/11 first responders have a disproportionately higher prevalence of PTSD compared to the general population (Boscarino, 2004; Lowell et al., 2018). The publications of works regarding the physical and mental health of 9/11 first responders predominantly focuses on physical health challenges with firefighters being the most studied demographic (Smith et al., 2019). The most common of these physical health challenges is respiratory diseases. 
+  Longitudinal studies have shown declining rates of PTSD over time in the general population. For rescue and recovery workers studies have documented the inverse, where this population appears to have an increase in PTSD diagnosis over time (Lowell et al., 2018). This may be due to medical hesitancy, or the nature of occupation leading to exacerbation effects when harm is left untreated and accumulates at the duration of the profession. 
+  When focusing on the population of first responders and mental health, PTSD is the largest diagnosis of concern. . A theoreticaltreatment will should consider the conclusions an of this study when setting a systemic modality for people exposed to terror attacks in the future. A study of the long-term mental health effects of the September 11, 2001, terrorist attacks found that the incidence of PTSD among police officers increased from 2.5% two years after the attacks to 6.3% six years after the attacks, with an annual PTSD incidence that peaked in the fourth year after the attacks and then stabilized (Schwarzer et al., 2016). Whether the increase in the PTSD incidence rate over time is due to latency in diagnosis or symptomatic onset is uncertain. A separate study found that of the 243 police officers with probable PTSD, 21.8% had probable PTSD without comorbidity, 24.7% had only depression, 5.8% had only anxiety, and 47.7% had comorbid depression and anxiety (Bowler et al., 2016). A review of World Trade Center Health Program statistics has found that cancer in general, as well as lung disease, heart disease, and PTSD, are increasing among 9/11 responders (Smith et al., 2021).
+  When looking at odds of mental illness, many factors play a role. Observing the age of exposure is considered a significant variable as younger individuals may experience PTSD symptoms when exposed to trauma. (Conrad et al., 2011) Previous literature has found that level of education is aligned with decreasing prevalence of PTSD given present mental illness and having experienced a traumatic event. For example, 43.3% prevalence compared to 33.5% prevalence between people with a high school degree or lower versus people with a college degree or higher (Goodman et al. 2002). Ethnicity and race are observed, as cultural coping mechanisms may lead to differing outcomes in being symptomatic when given the same exposure. (Weiss et al, 2017.) Also, access may be limited for minorities to health services. (Breslau, et al 2006.)  As this data looks only at First Responders that have moved to Florida this factor may be exacerbated as responders need to find new resources in the immigrated state which may act as another barrier of entry. Unemployment is observed as an added stressor from which may lead to vulnerability becoming symptomatic. Even if the exposure is historic. (Paul, Moser, 2009) Income may contain the same stressors as unemployment. Gender may provide differences in trauma given the same exposure.  These variables were selected based on the previous literature and are considered the demography and characteristic variables; Age during 9/11 attacks(Age911), Education, Hispanic, Race, if the responder is currently employeed (is_working), Income, if the responder is currently in treatment for an injury caused during 9/11 (TreatmentInjury), and the sex of the responder (Sex). 
+  Experiences may lead to Post Traumatic Stress Disorder, most found in combat veterans and victims of various assaults. For example, PTSD is as high as 50% for Woman who have been sexually assaulted (Chivers-Wilson, 2006). This provides the understanding that experiences are significant in the likelihood of having PTSD and needs to be observed in the model as well. 
+  Overall, these studies highlight the significant impact that PTSD has on the physical and mental health of 9/11 first responders and the importance of providing support and treatment to prevent negative health outcomes. This will allow for a framework that would assist other groups that go through similar trauma in response to disasters. During my time in the program, the Surf Side collapse, Turkish/Syrian Earthquakes, and many more disasters have occurred. Hopefully this can serve as a framework for assisting first responders.
+
+### Description of FIU-STATCONSULT
+  FIU-STATCONSULT is a statistical consulting organization within Florida International University (FIU). They have worked with hundreds of academic and clinical organizations within and outside FIU to ensure reliable analysis of Public Health data and support healthcare across the world.  As a statistical consulting organization, FIU-STATCONSULT supports research projects by providing statistical analysis, data management, and ensuring data quality for Principal Investigators, Substitute Investigators, and Student Investigators. Such support may include eDC design for projects, summary of data integrity collected so far or statistical consulting on data collected. FIU-STATCONSULT is staffed by PhD, MPH and MS level Biostatisticians trained in statistical analysis in longitudinal, survival, and case-control data. The staff has experience using software tools for analysis and domain knowledge in public health.
+  The organization uses multiple software packages for assisting research in data management and analysis. Some tools include REDcap, R, and SAS. REDcap is a form of electronic data capture (eDC) that stores and organizes information and measures per protocol in an online database. REDcap is widely used in public health in both academic and clinical research. eDC’s assists Principal Investigators in developing projections during a study and analysis at the end of the enrollment period. FIU-STATCONSULT utilizes this tool to provide a team of investigators with an easy user interface with the data collected. SAS and R are both statistical analytical tools used in clinical and academic settings. Biostatisticians from FIU-STATCONSULT use these software environments to assist a research team with advanced statistical analysis and data cleaning. This analysis allows investigators to better understand the information collected in their study. 
+  FIU-STATCONSULT has given investigators the support needed for complex analysis and management of data. Public health research benefits from this support by gaining insight into relationships and trends within the data. A better understanding of the data allows for a greater understanding of public health issues and improves health outcomes for communities. Public health provides a defense and intelligence for society against diseases, disorders and syndromes while increasing the well-being of the population of interest. Public health efforts also help reduce health care costs by increasing the efficiency of primary, secondary, and tertiary prevention.
+  Biostatistical analysis is a specialized field that relies on knowing clinical and public health aspects, while also understanding mathematics methods and computer science languages. FIU-STATCONSULT provides this niche specialty as a service to multiple organizations that investigate public health. Often working closely with these teams that have collected the data. This service is vital to public health and expands scientific understanding of the environment, society and medications related to health.
+
+### Description of World Trade Center First Responders and Developments of PTSD
+The World Trade Center (WTC) Florida project is a study within Florida International University (FIU) to collect information on first responders to the 9/11 terrorist attack who now live in Florida. First responders are considered firefighters, police officers, and waste managers among other responders. After the events of 2020, domestic migration changed the demographic topology of the country. Many former New Yorkers arrived in Florida seeking new residence. Though common before 2020 migration significantly increased in the following years. Some migrants included the First Responders during the September 11th terrorist attacks on the World Trade Center. The project aims to fill a gap in the existing research by targeting this demographic specifically and investigating characteristics or experiences that may significantly impact the likelihood of someone being diagnosed with PTSD. First responders are uniquely of interest as their experience with 9/11 may leave them more susceptible to physical and mental health issues. The state of New York has provided services for 9/11 first responders. Many of the residents that participate in the migration from New York to Florida have or may lose access to governmental services and observational infrastructure may not be as robust in Florida compared to New York. 
+The investigators identified the unique circumstances of 9/11 first responders and created a network of identification and collaboration. A list of 9/11 first responders living in Florida has been provided to the research team by the World Trade Center Project in NYC whose aims to provide a status report and overview of first responders which will include analysis of cancer, frailty, and mental health issues. To supplement the list provided to the team of investigators, advertisements will be distributed into the community for first responders to receive information on how to contact the team if they would like to participate further. The investigators have collected data via contact and communication. The first aspect is a survey and questionnaire portion. A research assistant will reach out to 9/11 first responders residing in Florida, requesting they participate in the study and conduct a pre-screening measure. If eligible they will be scheduled for a baseline visit. At baseline, they will be consented and offered a copy of the ICF. They will be given a Participant ID to de-identify the individual and respect Good Clinical Practices and HIPAA. The participant will then be asked a series of questions and responses. These questions and responses will be documented on REDcap by that research assistant that scheduled the appointment. These variables are selected by the WTC Florida Project team based on relevant literature and desired aims of research. The visit may be caried out in English or in Spanish. As these residents are living in Florida it is important to have both linguistic options. The participant will also be given the opportunity to connect with support groups located in Florida. The study is monitored by the Internal Review Board (IRB). All protocol deviations will be reported to the IRB who validated the protocol proposal. The second aspect contains data received from the World Trade Center project of people who participated in data collection in New York and have informed the project of a new residence in Florida. The data includes a series of scales taken at a base line and at follow ups. These items include scales such as the Benefits Eligibility Assessment Screening Tool (BEAST), the Exposure Assessment Questionnaire (EAQ), the Mental Health Diagnostic Interview Schedule (MHDIS), the Mental Health Screening Questionnaire (MHSQ), a Physical Examination (PE), the Self-Administered Medical Questionnaire (SAMQ), and the Self-Administered Mental Health Questionnaire (SAMHQ). Some of these scales are only captured at baseline while others may be repeated measures collected in a series of visits. Many of these measures will capture information regarding mental health status, experiences during 9/11 and demography question. During the physical examination body measurements may even be taken. The variables selected were based on literary background and domain expertise of the investigators. Once variables were selected the data team, including myself, report the status of the data to the investigators. This allowed the investigators to better understand the limitations of the data and request a particular direction they would like the nature of the analysis to go. Based on this a model was created that selected variables, some for characteristics and others for exposures. The variables have been described in the methods section and are further elaborated on in the outcomes section. Seven models were created observing the exposures as the primary variables.  
+The WTC Florida project will provide support and aid in understanding this group of 9/11 first responders especially as more of the New York population moves down to Florida. This population requires support due to vulnerabilities in physical and mental health that may arise due to their response to the 9/11 terrorist attacks. It is hopeful that the outcomes will allow policymakers and support groups to be better informed on how to assist 9/11 first responders suffering from PTSD. 
+
+### Overview of Responsibilities
+As part of the practicum, I have assisted in the project in data management and analysis. My responsibilities include designing the study within the eDC, REDcap. Designing the questionnaire within REDcap has allowed the study team to administer the survey and questionnaire over the phone and allows for participants to self-administer through an online portal. Also, I have created a report of the data received from the World Trade Center Project. With this report investigators have been able to move forward with building paper proposals. It has also been used by myself for my own project. 
+REDcap is an electronic data capture tool that allows for the data to be recorded and documented. This is important when the data will be exported and used for further analysis. As the eDC designer I have received a word document of questions and responses the investigators would like administered to the participants. Items received that I have implemented include the Pre-screener, Informed Consent Form, and Survey/ Questionnaire forms. The Pre-Screener was implemented in an independent project to determine which potential participants meet eligibility criteria. The items I have implemented included the questions and answer options, which have been made available in English and in Spanish. Once the participants are determined to meet eligibility criteria the participant will be directed to the Informed Consent Form (ICF). I have implemented the ICF ensuring the verbiage remains congruent with the IRB approved original version and compliant with REDcap format. A copy of the Informed Consent in PDF version has been uploaded to the section available for download for the participants. The ICF has been made available to be administered in English or Spanish. My implementation of the survey and questionnaire reflects the word document of the questions and answer choices provided. These have been implemented into REDcap and validated so that the content is congruent and fits the format of REDcap. Answer choices provided have been coded uniformly for understanding of values when the data is exported for analysis. This was implemented in English and Spanish. Once all items have been designed. I requested a quality control review of items. Some of the translations were incorrect. The research coordinator reveiwed the items on REDcap and corrected any mistranslations. These corrections are then communicated with me to be implemented. REDcap will allow the research team to better administer the procedures over the phone and be electronically captured. This will allow for remote collaboration and streamline exporting the data. Designing the REDcap in English and Spanish allowed the WTC Florida Project team to expand the potential pool of participants. This is especially important as Monolingual Spanish first responders may have more barriers to services and may come to Florida at higher rates due to the appeal of South Florida’s Spanish Dominate Culture. 
+The database provided by the World Trade Center Project holds about 2,500 participants’ de-identified information. The original dataset had thousands of variables. Hundreds were requested by me and the other investigators based on our own field of interest and literary review. Our selection amounted to about 300 variables from the directory for potential analysis. Once the variables have been provided, I conducted a summary review of the data. Firstly, the data was placed into R studio for malleability. After the data was imported, verification that all variables requested were received was completed. A review of the number of participants was calculated to determine the size of the sample which amounts to 2,809. Then the integrity of the data is drafted, looking for missingness. This is cross-referenced with the data user guidelines to see when measures are collected and ensure data isn’t considered missing erroneously. After ensuring the integrity of the data certain variables are merged if the question relating to the variable is found to be congruent are capturing the same information. The analysis regarding PTSD and first responders was cross-sectional so repeating measures will be removed. Visit two measures and demographic data were selected for analysis. Variables were further reduced with further literature review and a justification of each variable considered is included. The number of variables selected were determined by the number of observation where y=1 is divided by 10. Cleaning data is important for analysis to make sure R studio properly reads the variables. R may not be able to run without proper variable organization. R leads management by allowing for variables to be centered, reduced, and identify missing values among other items. For analysis a collaborative effort was created using GIThub. With the data team, GIThub was used to make updates to code and models synergistically. This allows all data members to be on the same page on the status of analysis. By identifying the PTSD variable as binary and logistic regression was ran on eight characteristic variables and one exposure variable. Seven models were created with each of exposure characters observed as the primary variable in each.
+Providing these services will allow the WTC Florida Project Investigators to collect vital information on 9/11 first responders. This vital information is to be analyzed for the aims of the investigators including my own aim of finding the conditions for 9/11 first responders that may affect the likelihood of first responders being diagnosed with PTSD. 
+
+
+## Synthesis of MPH Core/Concentration Area Competencies
+
+### Competency 1: Select quantitative and qualitative data collection methods appropriate for a given public health context.
+Data collection is a vital part of analysis. Proper collection methods will account for randomization and bias. This allows for biostatistics to better utilize the data. Data for this study is considered a collaborative effort. As well as individual research through literary review. The data collected from the World Trade Center Project is a verified organization that has domain expertise on the population and has gathered these measures via certified individuals relative to the metric collected. Furthermore, the variables that were selected by our team of investigators were evidence based and with the goal of furthering research in the population as it relates to physical and mental health. The other data collection method will allow for more unrestricted access to information that still falls within IRB guidelines. The team of investigators has prepared the questionnaire portion to be more tailored to further analysis as the collaboration between our investigators and the World Trade Center Project flourishes. I have assisted in this effort by providing the electronic system requested to record these measures. 
+As stated previously these measures include demographic data as well as mental and physical health data. Each has been given a justification as to why they should be considered for analysis. Also, the nature of the data is considered for analysis. To accurately consider the measures, it must be understood when the measure is taken and if it is a repeating metric. This was done by cross referencing the data with the data user guidelines that depict the nature of 
+the data collection. As a biostatistician this is important to better understand variables for analysis. 
+Data collection methods are an important part of research. They must fall under the protocol guideline as approved by the IRB. As a part of the back-end aspects as well. It is my duty to ensure data the is entered is done properly to ensure Good Documentation Practices. 
+
+### Competency 2: Analyze quantitative and qualitative data using biostatistics, informatics, computer-based programming, and software, as appropriate.
+Working with large datasets necessitates the use of a program that can manipulate information more appropriately than excel. R was used to better meet the cleaning and analysis requirements. The large data set includes 10 sheets of data each containing a million items on average. Excel struggles to manipulate these datasets all at once. Also, the record of tracking data manipulations for corrections is often only tracked under macros. Tracking manipulation allows individuals to track proof of work and make corrections in areas where needed. 
+Biostatistical analysis was performed on the data as well using R. Frequency tables independence and distribution test were performed on the data to ensure the data fit assumptions. Based on literature and robustness of variables. Certain measures will be placed in the model for a logistic regression. Logistic regression measures the odds of an event dependent on the variables in the model. This is best formed in software more complex than excel like R or SAS. Based on a summary of the variables data a backwards stepwise elimination is performed to increase the fit of the model. R creates a report of both the code and the results. This report allows for an easily accessible understanding of the data, analysis process, and results. This allows biostatisticians to present information to an audience that can enact policy based off the information provided. 
+These are common practices in with advisory to public health officials or reported drafted to the FDA for pharmaceutical approval. The use of these tools has allowed for better documentation of information and create a trail of data management that allows for auditing practices to be streamlined to maintain the integrity of the practice and its fields.
+
+### Competency 3: Interpret results of data analysis for public health research, policy or practice.
+Interpretation of data analysis allows for investigators to properly display a narrative for public health officials and politicians to decide policy decisions. The conclusions of the study will be used to identify groups most susceptible to PTSD and proposed aims for treatment. 
+Logistic regression will be used to determine characteristics that may lead someone to have PTSD. Logistic regression is used for binary variables. In this case the output variable is binary, whether the participant has PTSD or not. Other explanatory variables will be added to the model to determine which aspects of a person or a person’s experience on 9/11 leads to higher rates of PTSD. Also, to determine if any of these aspects or experiences have a relationship on the likelihood of PTSD. R will be responsible for the managing and analysis of data provided. Managing will involve combining multiple datasets and organizing the variables to be accepted for a logistic regression analysis. 
+The analysis done by the team of investigators is guided by the foundation completed within the literary review. This literary review has results from data sets that have been interpreted by the team of investigators too and lead us to what we believe will be relevant analysis. This is done by understanding beta coefficients, transformations, and p-values. This was also done as part of my analysis.
+
+### Competency 4: Apply common statistical methods for inference, including: estimation, confidence intervals, and univariate or multivariate hypothesis testing.
+Using statistical methods for inference on the status of the population allows for an understanding of what aspects are important regarding likelihood of having PTSD symptoms in relation to this project. Inferencing allows statisticians to take a sample of the population and build conclusions for the population based on results from the conclusion. This will usually be done with an estimate of the trends found in the sample, within a certain confidence interval. These estimations are created via hypothesis testing from T-Test, Chi-Squares, to multivariate tests like linear or logistic regressions. 
+Based on the data provided, it was determined a logistic regression on if the participant has symptoms of PTSD or not would be done. To run this multivariable analysis, assumptions of the variables in the model must be met. To ensure that the data meets this these assumptions, tests of fit were run on the variables. 
+The logistic regression will be run with all variables in the model. Depending on the significance of each variable. Significance may be tested by a p-value < 0.05 or a 95% confidence interval that does not overlap 0.
+
+### Competency 5: Develop practical skills for use of statistical software such as SAS/R in data management, integration, analysis, and interpretation for public health studies.
+R and SAS have played a vital role in data management allowing for the cleaning of datasets. Cleaning data sets is important to ensure that all data is properly represented and organized in a way that is prepared for analysis. R and SAS make this much easier by allowing for manipulation of datasets on a massive scale. R is used to organize all received data. The data was first imported into R studio then combined into a single data set by measure and subject. Adjustments are then made to either consolidate variables or remove variables that are no longer considered relevant. This made analysis much easier with a refined dataset. Much of the cleaning will be done with the assistance of the external package “dpylr” commonly used to clean data in R. Analysis will be done on this refined dataset, testing for distribution and independence all within R. Lastly the model will be created and utilized using the summary and “lm” functions in R. 
+The use of R allowed for manipulation of the datasets. As previously stated, these datasets totaled over one million observations each on average. A report of the missing data was then created using R to count the number of instances that a variable gave a “NA” measure and compared this to the number of variables in the data frame. This is then considered to count missing variables erroneously as some measures were not collected at some visits. This was then adjusted in R to select variable relevant for analysis at a given visit or for variables not considered time sensitive. This was then completed in a table. 
+R will contain documentation of all manipulation that has been conducted on the datasets imported in an R markdown file. The R markdown down file will also document and conduct all aspects of analysis. R documents the number of variables and observations to determine the number of variables imported and used or the sample size. This will also ensure observations are not unwantedly lost.
+
+## Outcome/Results
+A set of characteristic variables were ran through seven multivariable logistic regresson models for  each one of the exposure variables. The characteristic variables are identified as age of responder during the 9/11 attack (Age911), Education, Race, if the responder is currently employed , (Is_Working), Income, if the responder is currently in treatment for an injury caused by 9/11 (TreatmentInjury), and Sex. These were selected based on the literature findings. The Exposure variables are identified as, If the responder was close to bodies being recovered, (CloseRecoveryBodies), Number of bodies that were witnessed in the recovery effort, (NumberRevoceryOfBodies), If the responder believed there life was in danger during the attack, (BelieveLifeiInDangerDuringAttack), if the responder saw family members of the victims grieving, (SeeFamiliesVictims), If the responder believed there life was in danger by the nature of there work(BelieveLifeInDangerByWork),  if the responder knows some one who was killed (KnowPeopleKilled), if the responder witnessed injury or death of anyone as part of the recovery effort (SeeInjuredOrKilledEvacuation), and if the responder saw anyone effected during the revocery effort(SeePersonalEffects). These variables were selected from the dataset regarding specific experiences one may have had during 9/11. Seven models were run and will be presented below. All exposure variables were considered significant exceptKnowing someone who was killed in the 9/11 attacks, this could be since this is one level removed from a personal experience, as the experience occurred to someone else.
+Age during 9/11, Income and Current treatment for an injury that occurred during 9/11 were consistently significant. Age during 9/11 in six of the seven model has an Odds ratio (OR) of 1.03 (all CI 1.01-1.06) with the one remaining study having an Age during 9/11 OR of 1.04. Which means as age increase by one year the odds of having a PTSD symptom increases by a factor of 1.03. This is the inverse of what was expected due to the literature. Income varies between 1.94 and 2.07 between all the models (Lower CI: 1.24-1.32 Upper CI: 3.02-3.22). Based on these models, the likelihood of having symptoms of PTSD in the last 12 months increases by a factor of about 2.00 when comparing responders who make less than `$`60,000 to those who make more than `$`60,000 when all other variables are held constant in the model. Current treatment for an injury that occurred during 9/11 is significant in all the models with OR’s varying between 2.16 and 2.46 (Lower CI: 1.39-1.58, Upper CI: 3.44-3.89). The odds of having PTSD symptoms in the last 12 months increases by a factor of about 2.31 when comparing responders who have been being treated for injuries compared to ones who are not when all other variables are held constant in the model. Being currently employed is significant in one of the models. The OR for this significant parameter is 0.62 (CI 0.38-0.99). The likelihood of having PTSD in the last 12 months decreases by a factor of about 0.615 when comparing people who are employed to people who are unemployed when all other variables are held constant in the model. Education is only considered significant once in the model. The OR of having symptoms of PTSD in the last 12 months decreases by a factor of 0.63 (CI 0.41-0.98) when comparing University education to non-university educated responders. A Chi-Square test was ran on the independent variables against current PTSD diagnosis a test of independence.
+
+### Chi-Square tests for Categorical variables
+Significant characteristics variables are determined to be, Education, if the responder is currently working (is_working), Income, and if the responder is currently in treatment for an injury caused by 9/11 (TreatmentInjury). While exposure variables appear as, If the responder believed there life was in danger during the attack, (BelieveLifeiInDangerDuringAttack) , if the responder saw family members of the victims grieving(SeeFamiliesVictims), If the responder believed there life was in danger by the nature of their work, (BelieveLifeInDangerByWork), if the responder witnessed injury or death of anyone as part of the recovery effort, (SeeInjuredOrKilledEvacuation), and if the responder saw anyone effected during the revocery effort, (SeePersonalEffects). The other variables will still be considered in the analysis for literary relevance. Age considered at 9/11  and number of bodies a responder witnessed during the recovery  effort will be considered with different testing as they are continuous variables.
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+results_list <- list()
+for (col in colnames(analysis_3)){
+    contingency_table <- table(analysis_3[[col]], analysis_3$PTSD)
+    chisq_result <- chisq.test(contingency_table)
+
+    # Store the results in the list
+    results_list[[col]] <- list(
+      "Variable" = col,
+      "Chi-square statistic" = chisq_result$statistic,
+      "Degrees of freedom" = chisq_result$parameter,
+      "p-value" = chisq_result$p.value
+    )
+}
+
+# Convert the list to a data frame
+results_df <- do.call(rbind, results_list)
+results_df <- as.data.frame(results_df)
+
+
+# Filter the variables in results_df
+filtered_results_df <- results_df %>%
+  filter(Variable %in% c("Education", "Hispanic", "Race", "is_working", "Income", "BelieveLifeiInDangerDuringAttack", "SeeFamiliesVictims", "BelieveLifeInDangerByWork", "KnowPeopleKilled", "SeeInjuredOrKilledEvacuation", "SeePersonalEffects"))
+
+# Rename variables in the filtered_results_df data frame
+filtered_results_df$Variable <- c(
+  "Education",
+  "Hispanic",
+  "Race",
+  "Currently Employed",
+  "Income",
+  "Believed life was in danger during the 9/11 attack",
+  "See family of victims mourning",
+  "Believed work placed Responder in danger",
+  "Know people who were killed in the 9/11 attack",
+  "See people injured or killed during the 9/11 attack",
+  "See victims affected by the 9/11 response"
+)
+
+filtered_results_df$`p-value` <- round(as.numeric(filtered_results_df$`p-value`), digits = 3) 
+
+filtered_results_df$`Chi-square statistic` <- gsub("[^0-9.]+", "", filtered_results_df$`Chi-square statistic`) |> 
+  as.numeric() |> 
+  round(digits = 3)
+
+rownames(filtered_results_df) <- NULL
+
+table_html <- filtered_results_df %>%
+  kable(format = "html", align = "c", caption =  "<span style='font-size:40px'>Table 1.1: Chi-Square test by variable and Current PTSD diagnosis</span>") %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+
+table_html
+```
+
+### Table 2.1: Test of fit for variable Number of bodies witnessed during the recovery effort
+```{r, echo=FALSE}
+simple.eda(analysis_3$NumberRevoceryOfBodies)
+```
+<br>
+Based on the values, the data is skewed right, outliers on the higher values and is not following the distribution of normality. This variable will be included as one of the models, but this will be identified in the description of the model. 
+
+### Table 2.2: Test of fit for variable Age of responder during 9/11
+```{r, echo=FALSE}
+simple.eda(analysis_3$Age911)
+```
+<br>
+Based on the histogram, boxplot, and Q-Q plot, normality is followed with some outliers. On the upper end. The variable mostly fits the rules of normality and will be considered in the model. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+analysis_4 <- select(analysis_3, 1:6, 29, 30, 7, 8:15) |>
+  rename(`Age_During_911` = Age911) |>
+  rename(`Currently_Employed` = is_working) |>
+  rename(`Number_of_bodies_seen` = NumberRevoceryOfBodies) |>
+  rename(`Responder_believed_life_was_in_danger` = BelieveLifeiInDangerDuringAttack) |>
+  rename(`Saw_family_members_morn_loved_ones` = SeeFamiliesVictims) |>
+  rename(`Responder_believed_work_placed_them_in_danger` = BelieveLifeInDangerByWork) |>
+  rename(`Know_people_who_were_killed` = KnowPeopleKilled) |>
+  rename(`Seen_victims_injured_or_killed` = SeeInjuredOrKilledEvacuation) |>
+  rename(`Seen_people_personally_effected_by_the_911_attack` = SeePersonalEffects) |>
+  rename(`Current_Treatment_for_911_Injury` = TreatmentInjury)
+
+CoVariables <- colnames(analysis_4)[1:8]
+Exposure_Variables <- colnames(analysis_4[10:17])
+
+# Function to produce Table
+## Is the formula that will be used
+Models_AFG <- function(i){
+  
+   ptsd_log_recipe_AFG <- recipe(reformulate(c(CoVariables, Exposure_Variables[[i]]), response = "PTSD"), data = analysis_4) |>
+  step_impute_mode(all_nominal_predictors()) |>
+  step_impute_mean(where(is.double)) |>
+  step_corr(threshold = 0.7) |>
+  step_zv(all_predictors())
+ 
+names(ptsd_log_recipe_AFG[["var_info"]][["variable"]]) <- c("Age at 911", "Education", "Hispanic", "Race", "Currently Employed", "Income", "Close Recovery Bodies", "PTSD")
+
+
+base_AFG <- prep(ptsd_log_recipe_AFG) |> bake(new_data = analysis_4)
+
+## the function that will be used on the formula
+ptsd_log_spec_AFG <-
+  logistic_reg() |>
+  set_mode("classification") |>
+  set_engine("glm")
+
+## Combining the two?
+wf_logistic_AFG <-
+  workflow() |>
+  add_recipe(ptsd_log_recipe_AFG) |>
+  add_model(ptsd_log_spec_AFG)
+
+## Fit
+the_fit_AFG <-
+  fit(wf_logistic_AFG, data = analysis_4)
+
+
+## Pretty Table
+the_fit_AFG |>
+  workflows::extract_fit_parsnip() |>
+  tbl_regression(exponentiate = TRUE) |>
+  bold_p(t = 0.05) |>
+  italicize_levels() |>
+  as_gt() %>%
+  gt::tab_header(
+    title = "Multiple Logistic Regression for PTSD"
+  ) %>%
+  gt::as_raw_html() %>%
+  gsub("_", " ", .) %>%
+  htmlTable(., rnames = FALSE, border = 1, width = "100%")
+}
+
+
+# Select 1-8
+    # 1. CloseRecoveryBodies
+    # 2. NumberRevoceryOfBodies
+    # 3. BelieveLifeiInDangerDuringAttack
+    # 4. SeeFamiliesVictims
+    # 5. BelieveLifeInDangerByWork
+    # 6. KnowPeopleKilled
+    # 7. SeeInjuredOrKilledEvacuation
+    # 8. SeePersonalEffects
+```
+
+### Table 3.1: Characteristic Variables and Number of bodies witnessed during the recovery effort
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+Models_AFG(2)
+```
+Given all variables are held constant the odds of having current PTSD symptoms  increase by a factor of 1.02 (CI 1.00,1.04) for every unit increase in number of bodies seen during the recovery effort. The variable lacks proper normal distribution and has many outliers. No conclusions can be determined regarding the variables. 
+
+### Table 3.2: Characteristic Variables and If the responder believed their life was in danger 
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+Models_AFG(3)
+```
+Given all variables are held constant the odds of having current PTSD symptoms increases by a factor of 3.11 (2.02,4.85) when comparing Responders who believed their life was in danger to the people who don’t. 
+
+### Table 3.3: Characteristic Variables and Saw family members morn loved ones
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+Models_AFG(4)
+```
+Given all other variables are held constant the odds of having current PTSD symptoms increases by a factor of 1.75 (CI 1.14, 2.74) when comparing people to who witness family members grieving victims compared to people who did not. Education is considered significant in the model when considering Seeing the family of Victims in the model. This may be an alpha 1 type error. 
+
+### Table 3.4: Characteristic Variables and Responder believed if there workplaces places them in danger
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+Models_AFG(5)
+```
+Given all other variables are held constant the odds of having current PTSD symptoms increased by a factor of 2.98 (CI 1.93-4.71) when comparing if the responder believes their profession places you in danger compared to those who do not. Current employment is significant when believing your work places your life in danger. As they both reflect employment this may be due to general anxieties around employment. 
+
+### Table 3.5: Characteristic Variables and Know people who were killed
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+Models_AFG(6)
+```
+If responders know people who died during 9/11 or not is not statistically significant in current PTSD diagnosis 
+
+### Table 3.6: Characteristic Variables and Seen victims injured or killed 
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+Models_AFG(7)
+```
+Given all other variables are held constant, the odds of having PTSD symptoms in the past 12 months increases by a factor of 1.93 when comparing responders who saw people killed or injured compared to ones who did not. 
+
+### Table 3.7: Characteristic Variables and Seen people personally effected by the 9/11 attack.
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+Models_AFG(8)
+```
+ If the responder saw people effected by the 9/11 response or not was not statically significant in the odds of having a current PTSD diagnosis 
+
+
+## Lessons Learned
+The study tackles a novel demographic. Because of the pioneering nature of the study, lessons will be learned for migration populations categorized by career. The lessons learned will help expand further research on this topic. For example, conditions of travel nurses or Professors teaching in academic institutions abroad. 
+As a field, Biostatisticians often do not work in the data collection process. This may lead to a lack of understanding of data and erroneous calculations. This segregation is often necessary or legally enforced to ensure no conflict of interest. Pharmaceutical companies and clinical research groups are often segregated parties that use intermediaries like an internal review board, technology vendors and others. Communication between the investigators and researchers is vital to maintain good clinical practice and data management. 
+The study collected a series of measures. Some of these measures were collected repeatedly. Understanding which of the data is repeating versus which of the data is not vital. Often the context of test may be to see change over time rather than the values themselves. Even when doing a cross-sectional analysis this information remains vital when considering which values to keep and which to remove. 
+If the measures are analyzed in a logistic regression, they may require understanding the intervals when considering other measures in the model. This is important to ensure the time intervals of measures are congruent. Measuring a day-to-day change to a year to year is often poor statistical practice. The data will need to be homogenized. This also takes a specific focus on dates of follow ups. The data did not have dates available, and the investigator team did not follow up on such measures. 
+The measures were selected individually from a data dictionary with the New York team. These measures should have been taken in collaboration. For example, an initial meeting should have occurred with the team of investigators making the request and the New York team to gain a congruent understanding of the data and variables. A follow up meeting should have occurred to select agreed upon variables. Lastly additional variables could have been selected by individuals for analysis, in correspondence with the biostatistics team. 
+The study’s novel practices did lead to many lessons learned to better for a path for first responders. This research may develop new modalities for assisting migratory population not just in practice but also that are migrating for economic or resources reasons. It will be important moving forward that investigators and researchers keep more open communication regarding data and aims of the study. It will also be vital to maintain this communication with the New York team to seek more clarification and receive new data when needed.
+
+
+## Recommendations
+Proactiveness was of concern regarding the team of investigators. I think designing action items during meetings that can be documented during meetings would help the team benefit greatly. Also, minutes need to be captured live, administration needs to be involved with these studies to ensure minutes are captured. This will be good as many investigators may not be present for a meeting. Also having dedicated personnel to capture minutes during and not after will better capture the information. 
+Protocol training was not conducted for the study. Which is out of the orthodox practices of research. Protocol training should be administered to all investigators. Usually this will include a literature review and a synopsis of the treatment or measures. Literature review should be done at a personal level but reading or lectures need to be administered by the PI or sponsor to ensure a uniform understanding of the population and aims of the study. 
+This study was completed predominantly remotely. This is standard and often the data team will operate remotely in many studies. This is especially possible when the data is received via .csv or .txt from a third party. Also, the use of REDcap as a source is revolutionary when much of clinical research remains to be conducted with paper sources. But when operations are remote, email correspondence becomes vital. The team lacks responsiveness. This hindered progress and solutions to obstacles the team faced. For example, in the position of a junior role it is imperative to report finding to teams. These findings were reported and will often take weeks to find a response. This hindered advancement in query resolution. Follow up and scheduling request need to be made to ensure feedback.
+Email correspondence also needs to include the totality of members in the study. Outlook contains the “group feature” the group feature will make an email bundle that automatically attaches all members to an email chain. If applied all investigators will be included in all correspondence. Also, student investigators may be timid to raise correspondence to faculty investigators. This is understandable but then leaves many out in the dark. 
+These lessons learned will hopefully be resolute. If implemented, I believe repeating mistakes will become less frequent. Also, if university research better reflects industry standards this will lead to a better prepared student body when they graduate. I have been grateful for my time with the team and look forward to further assisting the team until the termination of the study. 
+
+
+## Refrences 
+
+* Smith EC, Holmes L, Burkle FM. The Physical and Mental Health Challenges Experienced by 9/11 First Responders and Recovery Workers: A Review of the Literature. Prehosp Disaster Med. 2019 Dec;34(6):625-631. doi: 10.1017/S1049023X19004989. Epub 2019 Oct 18. PMID: 31625489.
+
+*	Lowell A, Suarez-Jimenez B, Helpman L, Zhu X, Durosky A, Hilburn A, Schneier F, Gross R, Neria Y. 9/11-related PTSD among highly exposed populations: a systematic review 15 years after the attack. Psychol Med. 2018 Mar;48(4):537-553. doi: 10.1017/S0033291717002033. Epub 2017 Aug 14. PMID: 28805168; PMCID: PMC5805615.
+	
+*	Schwarzer, R., Cone, J.E., Li, J. et al. A PTSD symptoms trajectory mediates between exposure levels and emotional support in police responders to 9/11: a growth curve analysis. BMC Psychiatry 16, 201 (2016). https://doi.org/10.1186/s12888-016-0907-5
+	
+*	Bowler RM, Kornblith ES, Li J, Adams SW, Gocheva VV, Schwarzer R, Cone JE. Police officers who responded to 9/11: Comorbidity of PTSD, depression, and anxiety 10-11 years later. Am J Ind Med. 2016 Jun;59(6):425-36. doi: 10.1002/ajim.22588. Epub 2016 Apr 20. PMID: 27094566.
+	
+*	Smith E, Holmes L, Larkin B. Health Trends among 9/11 Responders from 2011-2021: A Review of World Trade Center Health Program Statistics. Prehosp Disaster Med. 2021 Oct;36(5):621-626. doi: 10.1017/S1049023X21000881. Epub 2021 Sep 2. PMID: 34550060.
+	
+*	American Psychiatric Association. (2013). Diagnostic and statistical manual of mental disorders (5th ed.). Washington, DC: American Psychiatric Association.
+Breslau, N., Lucia, V. C., & Alvarado, G. F. (2006). Intelligence and other predisposing factors in exposure to trauma and posttraumatic stress disorder: A follow-up study at age 17 years. Archives of General Psychiatry, 63(11), 1238-1245. doi: 10.1001/archpsyc.63.11.1238
+
+* Goodman E, Huang B. Socioeconomic Status, Depressive Symptoms, and Adolescent Substance Use. Arch Pediatr Adolesc Med. 2002;156(5):448–453. doi:10.1001/archpedi.156.5.448
+
+* Copeland, W. E., Keeler, G., Angold, A., & Costello, E. J. (2007). Traumatic events and posttraumatic stress in childhood. Archives of General Psychiatry, 64(5), 577-584.
+
+* Kendon J. Conrad, PhD and others, Self-report Measure of Psychological Abuse of Older Adults, The Gerontologist, Volume 51, Issue 3, June 2011, Pages 354–366, https://doi.org/10.1093/geront/gnq103
+
+* Weiss NH, Johnson CD, Contractor A, Peasant C, Swan SC, Sullivan TP. Racial/ethnic differences moderate associations of coping strategies and posttraumatic stress disorder symptom clusters among women experiencing partner violence: a multigroup path analysis. Anxiety Stress Coping. 2017 May;30(3):347-363. doi: 10.1080/10615806.2016.1228900. Epub 2016 Sep 17. PMID: 27575609; PMCID: PMC5357195.
+
+* Breslau J, Aguilar-Gaxiola S, Kendler KS, Su M, Williams D, Kessler RC. Specifying race-ethnic differences in risk for psychiatric disorder in a USA national sample. Psychol Med. 2006 Jan;36(1):57-68. doi: 10.1017/S0033291705006161. Epub 2005 Oct 5. PMID: 16202191; PMCID: PMC1924605.
+
+* Paul, K. I., & Moser, K. (2009). Unemployment impairs mental health: Meta-analyses. Journal of Vocational Behavior, 74(3), 264-282.
+
+* Chivers-Wilson, K. A. . (2020). Sexual assault and posttraumatic stress disorder: A review of the biological, psychological and sociological factors and treatments. McGill Journal of Medicine, 9(2). https://doi.org/10.26443/mjm.v9i2.663
+
